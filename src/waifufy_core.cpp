@@ -310,7 +310,14 @@ std::string join_tokens_min_sep(const std::vector<Token>& toks) {
 std::vector<Token> tokenize_minimal_cpp(std::string_view code) {
     std::vector<Token> toks;
     size_t i = 0, n = code.size();
-    auto push = [&](size_t b, size_t e) { toks.emplace_back(std::string(code.substr(b, e - b))); };
+    auto push = [&](size_t b, size_t e) { 
+        std::string token = std::string(code.substr(b, e - b));
+        // Prevent accidental "//" formation by adding space after single "/" tokens
+        if (token == "/") {
+            token = "/ ";
+        }
+        toks.emplace_back(token);
+    };
 
     const std::vector<std::string> PUNCTS = {
         ">>=", "<<=", "->*", "::", "->", "++", "--", "<<", ">>", "&&", "||",

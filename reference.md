@@ -37,9 +37,34 @@ This document describes the design, constraints, and usage of the waifufy tool i
 - Future improvement (not yet implemented): incorporate a per-character density table to better approximate grayscale ramps.
 
 ## Algorithm details
-- Mandatory separators: between adjacent tokens we may need a single space to avoid merging identifiers/numbers (e.g., `intx` vs `int x`). The layout respects this. In the current baseline, between-token filler is not added; only prefix and suffix fillers per line are used.
-- Sanitization: generated block comments are sanitized to never include `*/` in content.
-- Safety against very long tokens: if a single token exceeds the image width, we emit a solid-only line and then print that token on a dedicated line below to avoid stalling the layout. Such cases are rare unless width is tiny or raw strings are very long.
+
+### Core DP Layout Engine
+- **Dynamic Programming**: `convert_layout()` uses a 3D DP table with states `(i, j, k)` representing:
+  - `i`: current column position (0 to W_BOUND-1)
+  - `j`: number of tokens consumed (0 to tokens_left_total)
+  - `k`: separator requirement state (0=space, 1=comment, 2=needs_sep, 3=no_sep)
+- **Scoring**: Each character placement scores based on target density matching (0 for match, penalty for mismatch)
+- **Transitions**: Three types of DP transitions:
+  - **Space placement**: moves to next column with space character
+  - **Comment generation**: places `/* ... */` blocks of length 4-20 with random content
+  - **Token placement**: places actual code tokens with separator enforcement
+
+### Advanced Features
+- **Scarcity-aware budgeting**: Monitors token usage rate across rows and caps per-row token consumption when projection indicates early token exhaustion
+- **Randomized tie-breaking**: When DP transitions have equal scores, randomly updates backpointers to encourage layout diversity
+- **Relaxed selection**: Uses configurable relaxation factor (`SCORE_RELAXATION = W/10`) to prefer higher token counts within acceptable score range
+- **Overflow handling**: Rows beyond image height use per-line random width caps (`W + rand[0, 10)`) for natural line length variation
+
+### Safety and Constraints
+- **Mandatory separators**: `needs_separator()` enforces whitespace rules to prevent token merging, operator formation, and comment hazards
+- **Comment sanitization**: Generated block comments avoid `*/` sequences in content
+- **Token preservation**: All original non-comment tokens preserved in exact order with original text
+
+### Key Parameters
+- `MN_TOKENS = 4`: Minimum preferred tokens per row
+- `SCORE_RELAXATION_FACTOR = 10`: Relaxation divisor for token count preference
+- `MX_COMMENT_LENGTH = 20`: Maximum generated comment block length
+- `shoot = 10`: Width variance for overflow rows
 
 ## Build and Usage
 
@@ -73,11 +98,27 @@ cmake --build build -j
 g++ -std=c++17 -O2 build.cpp -o program
 ```
 
+## Recent Enhancements
+
+### Layout Algorithm Improvements
+- **Full DP implementation**: Complete 3D dynamic programming solution with state transitions for optimal token/comment/space placement
+- **Scarcity management**: Automatic token budgeting prevents token starvation in later rows by monitoring usage rates
+- **Diversity injection**: Randomized tie-breaking in DP transitions creates varied outputs across runs
+- **Smart selection**: Relaxed scoring allows higher token density within acceptable quality bounds
+
+### Bug Fixes
+
+- **Fixed Accidental Single-Line Comment Formation**: Resolved a critical bug where a single `/` token followed by a generated `/* ... */` comment would form `//`, inadvertently commenting out the rest of the line. The tokenizer (`tokenize_minimal_cpp`) was updated to append a space to any single `/` token, converting it to `/ `. This prevents the issue while preserving the semantics of the division operator.
+
+### Helper Tools
+- **Image conversion**: `helper/img2grid.py` converts images to ASCII art grids with configurable width and aspect ratio
+- **Grid generation**: Supports various input formats and customizable density mapping
+
 ## Limitations and next steps
-- Visual similarity uses strict equality only; density-aware matching is marked as a future enhancement.
-- The current layout inserts only a left prefix and right suffix filler per image row. Extending to inter-token filler blocks would significantly improve fidelity.
-- Very large preprocessed code (due to includes) is not applicable for your inputs (no includes). The preprocessor path is kept for general robustness.
-- No Tree-sitter integration yet; relying on system `g++`/`clang++` when available.
+- Visual similarity uses binary (0/1) density matching; grayscale density mapping could improve fidelity
+- Current comment generation uses random characters; smarter content generation could enhance appearance
+- No Tree-sitter integration yet; relying on custom minimal tokenizer
+- Inter-token spacing is currently minimal; more sophisticated spacing could improve readability
 
 ## Repository structure
 - `src/` - C++ source files
