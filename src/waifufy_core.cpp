@@ -461,6 +461,8 @@ std::string convert_layout(const std::vector<Token>& tokens,
 
     const int shoot = 10;
     const int MN_TOKENS = 4;
+    const int SCORE_RELAXATION_FACTOR = 10;
+    const int SCORE_RELAXATION = W/SCORE_RELAXATION_FACTOR;
     const int MX_COMMENT_LENGTH = 20;
     const int W_BOUND = W + shoot;  //final width has to be strictly less than this
     
@@ -687,29 +689,64 @@ std::string convert_layout(const std::vector<Token>& tokens,
         //choose the optimal string
         std::array<int, 3> optimal_state = {0, 0, 0};
 
-        std::pair<int, std::array<int, 3>> opt = std::make_pair(NEG_INF, std::array<int, 3>{0, 0, 0});
-        int jLo = (tokens_left_total >= MN_TOKENS) ? MN_TOKENS : std::max(0, tokens_left_total);
         int jHi = std::min(tokens_left_total, W_BOUND - 1);
-        for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
-            for (int j = jLo; j <= jHi; ++j) {
-                for (int k = 0; k < 4; ++k) {
-                    int val = dp[IDX(i, j, k)];
-                    if (val > opt.first) opt = {val, {i, j, k}};
+        bool selected = false;
+        for (int minTok = std::min(MN_TOKENS, tokens_left_total); minTok >= 0; --minTok) {
+            // 1) Check existence of any valid state with j >= minTok
+            bool has_any = false;
+            for (int i = std::max(0, W - shoot); i < W_BOUND && !has_any; ++i) {
+                for (int j = std::max(minTok, 0); j <= jHi && !has_any; ++j) {
+                    for (int k = 0; k < 4; ++k) {
+                        if (dp[IDX(i, j, k)] != NEG_INF) { has_any = true; break; }
+                    }
                 }
             }
+            if (!has_any) continue; // try lower minTok
+
+            // 2) Find the optimal answer (best score) among states with j >= minTok
+            int bestScore = NEG_INF;
+            std::array<int,3> bestState = {0,0,0};
+            for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
+                for (int j = std::max(minTok, 0); j <= jHi; ++j) {
+                    for (int k = 0; k < 4; ++k) {
+                        int val = dp[IDX(i, j, k)];
+                        if (val > bestScore) { bestScore = val; bestState = {i, j, k}; }
+                    }
+                }
+            }
+
+            // 3) Within score <= best + SCORE_RELAXATION, choose the state with maximum tokens
+            int threshold = bestScore + SCORE_RELAXATION;
+            int bestJ = -1;
+            std::array<int,3> bestJState = bestState; // default
+            for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
+                for (int j = std::max(minTok, 0); j <= jHi; ++j) {
+                    for (int k = 0; k < 4; ++k) {
+                        int val = dp[IDX(i, j, k)];
+                        if (val != NEG_INF && val <= threshold) {
+                            if (j > bestJ) { bestJ = j; bestJState = {i, j, k}; }
+                        }
+                    }
+                }
+            }
+
+            optimal_state = bestJState;
+            selected = true;
+            break;
         }
-        // Fallback: if still no valid, allow j==0 states (spaces/comments only)
-        if (opt.first == NEG_INF) {
+
+        // Fallback: as a last resort, allow j==0 states (spaces/comments only)
+        if (!selected) {
+            int bestScore = NEG_INF;
+            std::array<int,3> bestState = {0,0,0};
             for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
                 int j = 0;
                 for (int k = 0; k < 4; ++k) {
                     int val = dp[IDX(i, j, k)];
-                    if (val > opt.first) opt = {val, {i, j, k}};
+                    if (val > bestScore) { bestScore = val; bestState = {i, j, k}; }
                 }
             }
-        }
-        if (opt.first != NEG_INF) {
-            optimal_state = opt.second;
+            optimal_state = bestState;
         }
 
         //reconstruct the optimal string using optimal_state and back_point

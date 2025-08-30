@@ -57,7 +57,7 @@ You can build output by distributing tokens and adding filler between them. Use 
 If you need different char-density mapping, replace `default_ascii_density_01()` or add your own.
 
 ## Whitespace safety rules
-Two tokens `a` then `b` need at least one space if any of the following holds:
+Two tokens `a` then `b` need at least one space/comment/newline separator if any of the following holds:
 - Alnum/underscore merge: last of `a` and first of `b` are `[A-Za-z0-9_]` → would merge into an identifier/number.
 - Comment/close hazards: `a.endswith('/') and b.startswith('/')` (forms `//`), `a.endswith('/') and b.startswith('*')` (forms `/*`), or `a.endswith('*') and b.startswith('/')` (forms `*/`).
 - Multi-char operators formed across boundary: `>>=, <<=, ->*, ::, ->, ++, --, <<, >>, &&, ||, ==, !=, <=, >=, +=, -=, *=, /=, %=, &=, |=, ^=, ##, ...`.
