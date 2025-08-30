@@ -1,187 +1,366 @@
-template <typename info, typename tag>
-class f_lazy_segment_tree_chan
+template<typename T, const int B>
+class bitset_chan
 {
 public:
-    int n;
-    vector<info> infos;
-    vector<tag> tags;
-    seg_tree::in_order_layout layout;
+    using T_T = T;
+    static_assert(sizeof(T) * 8 == B, "check block width");
+    static_assert(std::is_same<T, uint64_t>::value, "modify popcnt(), ctz(), clz()");
 
-    void apply(seg_tree::point a, const tag &t)
+//static helper
+public:
+    static inline constexpr bool on(int i, T x) noexcept
     {
-        auto [l, r] = layout.get_node_bounds(a);
-        if (!t.apply_to(infos[a], l, r - 1))     //r - 1 to make inclusive
+        return ((T(1) << i) & x) != 0;
+    }
+    static inline constexpr T prefix(int i) noexcept
+    {
+        return (i >= B) ? ~T(0) : ((T(1) << i) - T(1));
+    }
+    static inline constexpr T suffix(int i) noexcept
+    {
+        return ~prefix(B - i);
+    }
+    static inline constexpr T range(int l, int r) noexcept
+    {
+        return prefix(r) ^ prefix(l - 1);
+    }
+    static constexpr int popcnt(T x) noexcept
+    {
+        // return _mm_popcnt_u64(x);
+        return __builtin_popcountll(x);
+    }
+    static constexpr int clz(T x) noexcept
+    {
+        return __builtin_clzll(x);
+    }
+    static constexpr int ctz(T x) noexcept
+    {
+        return __builtin_ctzll(x);
+    }
+    static inline constexpr int block_id(int i) noexcept
+    {
+        return i / B;
+    }
+ 
+//helper
+public:
+    inline T submask(int l, int r) const noexcept
+    {
+        int bx = block_id(l);
+        assert(bx == block_id(r));
+        return (b[bx] & range(l - bx * B + 1, r - bx * B + 1)); 
+    }
+    inline void trim() noexcept
+    {
+        b.back() &= prefix(n % B == 0 ? B : n % B);
+    }
+ 
+//main
+public:
+    int n, m;
+    std::vector<T> b;
+ 
+    bitset_chan(int n) : bitset_chan(n, false) {};
+    bitset_chan(int n, bool init) : n(n), m((n + B - 1)/B), b(m, init ? ~T(0) : T(0)) 
+    {
+        trim();
+    };
+ 
+    inline void set(int i, bool val) noexcept
+    {
+        assert(0 <= i and i < n);
+        if(val)
+            b[i/B] |= (T(1) << (i % B));
+        else
+            b[i/B] &= ~(T(1) << (i % B));
+    }
+ 
+    inline bool get(int i) const noexcept
+    {
+        assert(0 <= i and i < n);
+        return (b[i/B] & (T(1) << (i % B))) != 0;
+    }
+ 
+    void reset() noexcept
+    {
+        std::fill(b.begin(), b.end(), T(0));
+    }
+ 
+    //bitwise operations
+    void operator &= (const bitset_chan &other)
+    {
+        for(int i = 0; i < std::min(m, other.m); i ++)
+            b[i] &= other.b[i];
+        if(m > other.m)
+            std::fill(b.begin() + other.m, b.begin() + m, T(0));
+        // trim();
+    }
+ 
+    void operator |= (const bitset_chan &other)
+    {
+        for(int i = 0; i < std::min(m, other.m); i ++)
+            b[i] |= other.b[i];
+        trim();
+    }
+ 
+    void operator ^= (const bitset_chan &other)
+    {
+        for(int i = 0; i < std::min(m, other.m); i ++)
+            b[i] ^= other.b[i];
+        trim();
+    }
+ 
+    void operator <<= (int x)
+    {
+        if(x == 0)
+            return;
+ 
+        if(x >= n)
         {
-            assert(a < n);
-            downdate_node(a);
-            apply(a.c(0), t);
-            apply(a.c(1), t);
-            update_node(a);
+            reset();
             return;
         }
-        if (a < n)
+ 
+        const int s = x/B, d = x % B, r = B - d;
+ 
+        if(d > 0)
         {
-            t.apply_to(tags[a]);
+            for(int i = m - 1 - s; i > 0; i --)
+                b[i + s] = (b[i] << d) | (b[i - 1] >> r);
+            b[s] = b[0] << d;
+        }
+        else
+        {
+            for(int i = m - 1 - s; i > 0; i --)
+                b[i + s] = b[i];
+            b[s] = b[0];
+        }
+ 
+        std::fill(b.begin(), b.begin() + s, T(0));
+ 
+        trim();
+    }
+ 
+    void operator >>= (int x)
+    {
+        if(x == 0)
+            return;
+     
+        if(x >= n)
+        {
+            reset();
+            return;
+        }
+ 
+        const int s = x/B, d = x % B, l = B - d;
+ 
+        if(d > 0)
+        {
+            for(int i = s; i < m - 1; i ++)
+                b[i - s] = (b[i] >> d) | (b[i + 1] << l); 
+            b[m - 1 - s] = b[m - 1] >> d;
+        }
+        else
+            for(int i = s; i < m; i ++)
+                b[i - s] = b[i];
+ 
+        std::fill(b.begin() + m - s, b.end(), T(0));        
+ 
+        // trim();
+    }
+ 
+    bool operator == (const bitset_chan &other)
+    {
+        return ((n == other.n) and b == other.b); 
+    }
+ 
+    bool operator != (const bitset_chan &other)
+    {
+        return !(*this == other);
+    }
+ 
+    //extended
+    bitset_chan operator & (const bitset_chan &other)
+    {
+        bitset_chan result(*this);
+        result &= other;
+        return result;
+    }
+ 
+    bitset_chan operator | (const bitset_chan &other)
+    {
+        bitset_chan result(*this);
+        result |= other;
+        return result;
+    }
+ 
+    bitset_chan operator ^ (const bitset_chan &other)
+    {
+        bitset_chan result(*this);
+        result ^= other;
+        return result;
+    }
+ 
+    bitset_chan operator >> (int x)
+    {
+        bitset_chan result(*this);
+        result >>= x;
+        return result;
+    }
+ 
+    bitset_chan operator << (int x)
+    {
+        bitset_chan result(*this);
+        result <<= x;
+        return result;
+    }
+ 
+    bitset_chan operator ~()
+    {
+        bitset_chan result(*this);
+        for(auto &v : result)
+            v = ~v;
+        result.trim();
+        return result;
+    }
+ 
+    //custom operations
+    int count() const noexcept
+    {
+        return std::accumulate(b.begin(), b.end(), 0, [](int sum, T value) { return sum + popcnt(value); });
+    }
+     
+    int find_first()
+    {
+        int pos = -1;
+
+        for(int bi = 0; bi < m; bi ++)
+        {
+            if(b[bi] == T(0))
+                continue;
+            
+            pos = ctz(b[bi]) + bi * B;
+            break;
+        }
+
+        return pos;
+    }
+
+    int find_last()
+    {
+        int pos = -1;
+
+        for(int bi = m - 1; bi >= 0; bi --)
+        {
+            if(b[bi] == T(0))
+                continue;
+            
+            pos = B - clz(b[bi]) - 1 + bi * B;
+            break;
+        }
+
+        return pos;
+    }
+
+    void range_process(int l, int r, auto block_brute, auto block_quick)
+    {
+        assert(0 <= l and l <= r and r < n);
+ 
+        int bl = block_id(l), br = block_id(r);
+ 
+        if(bl == br)
+            block_brute(l, r);
+        else
+        {
+            block_brute(l, (bl + 1) * B - 1);
+            for(int bi = bl + 1; bi < br; bi ++)
+                block_quick(bi);
+            block_brute(br * B, r);
         }
     }
-
-    void downdate_node(seg_tree::point a)
+ 
+    void range_set(int l, int r, bool val)
     {
-        if (!tags[a].empty())
+        auto block_brute = [&](int l, int r) -> void
         {
-            apply(a.c(0), tags[a]);
-            apply(a.c(1), tags[a]);
-            tags[a] = tag();
-        }
-    }
-
-    void update_node(seg_tree::point a)
-    {
-        infos[a] = infos[a.c(0)].unite(infos[a.c(1)]);
-    }
-
-    f_lazy_segment_tree_chan() : f_lazy_segment_tree_chan(0) {}
-    f_lazy_segment_tree_chan(int n_) : f_lazy_segment_tree_chan(vector<info>(n_)) {}
-    f_lazy_segment_tree_chan(const vector<info> &a) : n(int(a.size()))
-    {
-        infos.resize(2 * n);
-        tags.resize(n);
-        layout = seg_tree::in_order_layout(n);
-        for (int i = 0; i < n; i++)
+            int bi = block_id(l);
+            T mask = range(l - bi * B + 1, r - bi * B + 1);
+            if(val)
+                b[bi] |= mask;
+            else
+                b[bi] &= ~mask;
+        };
+        auto block_quick = [&](int bi) -> void
         {
-            infos[layout.get_point(i)] = a[i];
-        }
-        for (int i = n - 1; i >= 1; i--)
+            b[bi] = (val ? ~T(0) : T(0));
+        };
+        range_process(l, r, block_brute, block_quick);
+    }
+ 
+    int count(int l, int r)
+    {
+        int cnt = 0;
+        auto block_brute = [&](int l, int r) -> void
         {
-            update_node(seg_tree::point(i));
-        }
-    }
-
-    void modify(int l, int r, const tag &t)
-    {
-        ++ r;
-        auto rng = layout.get_range(l, r);
-        rng.for_parents_down([&](seg_tree::point a)
-                            { downdate_node(a); });
-        rng.for_each([&](seg_tree::point a)
-                     { apply(a, t); });
-        rng.for_parents_up([&](seg_tree::point a)
-                            { update_node(a); });
-    }
-
-    void set(int p, const info &v)
-    {
-        auto pt = layout.get_point(p);
-        pt.for_parents_down([&](seg_tree::point a)
-                            { downdate_node(a); });
-        infos[pt] = v;
-        pt.for_parents_up([&](seg_tree::point a)
-                          { update_node(a); });
-    }
-
-    info query(int l, int r)
-    {
-        ++ r;
-        auto rng = layout.get_range(l, r);
-        rng.for_parents_down([&](seg_tree::point a)
-                             { downdate_node(a); });
-        info res;
-        rng.for_each_l_to_r([&](seg_tree::point a)
-                            { res = res.unite(infos[a]); });
-        return res;
-    }
-
-    info get(int p)
-    {
-        auto pt = layout.get_point(p);
-        pt.for_parents_down([&](seg_tree::point a)
-                            { downdate_node(a); });
-        return infos[pt];
-    }
-
-    //returns max point r such that f(sum[l, r]) = true given that f is monotonic as r increases 
-    //if (r > n), then f(sum[l, n]) = true 
-    //if (r < l), then f(sum[l, l]) = false
-    template <typename F>
-    int max_right(int l, F f)
-    {
-        auto rng = layout.get_range(l, n);
-        rng.for_parents_down([&](seg_tree::point a) { downdate_node(a); });
-        
-        int res = n;
-        info sum;
-        rng.for_each_l_to_r([&](seg_tree::point a)
+            cnt += popcnt(submask(l, r));
+        };
+        auto block_quick = [&](int bi) -> void
         {
-            if (res != n)
-            {
+            cnt += popcnt(b[bi]);
+        };
+        range_process(l, r, block_brute, block_quick);
+        return cnt;
+    }
+ 
+    int find_first (int l, int r)
+    {
+        int pos = -1;
+        auto block_brute = [&](int l, int r) -> void
+        {
+            for(int i = l; i <= r and pos == -1; i ++)
+                if(get(i))
+                    pos = i;    
+        };
+        auto block_quick = [&](int bi) -> void
+        {
+            if(b[bi] == T(0) or pos != -1)
                 return;
-            }
-            auto new_sum = sum.unite(infos[a]);
-            if (f(new_sum)) 
-            {
-                sum = new_sum;
+ 
+            pos = ctz(b[bi]) + bi * B;
+        };
+ 
+        range_process(l, r, block_brute, block_quick);
+        return pos;
+    }
+    
+    int find_last(int l, int r)
+    {
+        int pos = -1;
+        auto block_brute = [&](int l, int r) -> void
+        {
+            for(int i = l; i <= r; i ++)
+                if(get(i))
+                    pos = i;    
+        };
+        auto block_quick = [&](int bi) -> void
+        {
+            if(b[bi] == T(0))
                 return;
-            }
-            while (a < n)
-            {
-                downdate_node(a);
-                new_sum = sum.unite(infos[a.c(0)]);
-                if (f(new_sum))
-                {
-                    sum = new_sum;
-                    a = a.c(1);
-                } 
-                else
-                {
-                    a = a.c(0);
-                }
-            }
-            res = layout.get_node_bounds(a)[0];
-        });
-        -- res;
-        return min(res, n);
+ 
+            pos = B - clz(b[bi]) - 1 + bi * B;
+        };
+ 
+        range_process(l, r, block_brute, block_quick);
+        return pos;
     }
 
-    //returns min point l such that f(sum[l, r]) = true given that f is monotonic as l decreases
-    //if (l == 0), then f(sum[0, n]) = true
-    //if (l > r), then f(sum[r, r]) = false
-    template <typename F>
-    int min_left(int r, F f)
+    friend std::ostream &operator<<(std::ostream &os, const bitset_chan &bitset)
     {
-        ++ r;
-        auto rng = layout.get_range(0, r);
-        rng.for_parents_down([&](seg_tree::point a) { downdate_node(a); });
-        
-        int res = 0;
-        info sum;
-        rng.for_each_r_to_l([&](seg_tree::point a)
-        {
-            if (res != 0) 
-            {
-                return;
-            }
-            auto new_sum = infos[a].unite(sum);
-            if (f(new_sum))
-            {
-                sum = new_sum;
-                return;
-            }
-            while (a < n)
-            {
-                downdate_node(a);
-                new_sum = infos[a.c(1)].unite(sum);
-                if (f(new_sum))
-                {
-                    sum = new_sum;
-                    a = a.c(0);
-                }
-                else
-                {
-                    a = a.c(1);
-                }
-            }
-            res = layout.get_node_bounds(a)[1];
-        });
-        return res;
+        for (int i = bitset.m - 1; i >= 0; --i)
+            os << std::bitset<B>(bitset.b[i]);
+        os << '\n';
+        return os;
     }
 };
+
+using bitset_chan64 = bitset_chan<uint64_t, bit_width(uint64_t())>;

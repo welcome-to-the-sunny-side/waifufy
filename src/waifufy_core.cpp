@@ -9,6 +9,10 @@
 #include <regex>
 #include <stdexcept>
 #include <unordered_set>
+#include <iostream>
+#include <random>
+#include<array>
+#include <cstdint>
 
 namespace waifufy {
 
@@ -45,7 +49,7 @@ Art parse_art_to_density(std::string_view art_text,
                          const AsciiDensity* map) {
     AsciiDensity local_map = map ? *map : default_ascii_density_01();
 
-    // Split lines
+    // Split by lines first
     std::vector<std::string> lines;
     size_t start = 0;
     while (start <= art_text.size()) {
@@ -58,37 +62,77 @@ Art parse_art_to_density(std::string_view art_text,
             start = pos + 1;
         }
     }
-    if (!lines.empty() && lines.back().empty() && art_text.size() && art_text.back() == '\n') {
-        // trailing newline produced an extra empty line which is fine
+    // If the file ends with a newline, drop the final empty line so H matches visual rows
+    if (!lines.empty() && lines.back().empty() && !height_override && !width_override && !art_text.empty() && art_text.back() == '\n') {
+        lines.pop_back();
     }
 
+    // UTF-8 -> code points for each line
+    auto utf8_to_u32 = [](std::string_view s) -> std::u32string {
+        std::u32string out;
+        out.reserve(s.size());
+        for (size_t i = 0; i < s.size();) {
+            unsigned char c0 = static_cast<unsigned char>(s[i]);
+            if ((c0 & 0x80) == 0) {
+                out.push_back(static_cast<char32_t>(c0));
+                ++i;
+            } else if ((c0 & 0xE0) == 0xC0 && i + 1 < s.size()) { // 2-byte
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                char32_t cp = ((c0 & 0x1F) << 6) | (c1 & 0x3F);
+                out.push_back(cp);
+                i += 2;
+            } else if ((c0 & 0xF0) == 0xE0 && i + 2 < s.size()) { // 3-byte
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+                char32_t cp = ((c0 & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
+                out.push_back(cp);
+                i += 3;
+            } else if ((c0 & 0xF8) == 0xF0 && i + 3 < s.size()) { // 4-byte
+                unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+                unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+                unsigned char c3 = static_cast<unsigned char>(s[i + 3]);
+                char32_t cp = ((c0 & 0x07) << 18) | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+                out.push_back(cp);
+                i += 4;
+            } else {
+                // invalid byte, skip
+                ++i;
+            }
+        }
+        return out;
+    };
+
+    std::vector<std::u32string> u32lines;
+    u32lines.reserve(lines.size());
+    for (const auto& s : lines) u32lines.push_back(utf8_to_u32(s));
+
     Art A;
-    int H = static_cast<int>(lines.size());
+    int H = static_cast<int>(u32lines.size());
     if (height_override) {
         H = *height_override;
-        if (static_cast<int>(lines.size()) > H) {
-            lines.resize(H);
-        } else if (static_cast<int>(lines.size()) < H) {
-            lines.resize(H);
+        if (static_cast<int>(u32lines.size()) > H) {
+            u32lines.resize(H);
+        } else if (static_cast<int>(u32lines.size()) < H) {
+            u32lines.resize(H);
         }
     }
     int W = 0;
-    for (auto& s : lines) {
+    for (auto& s : u32lines) {
         if ((int)s.size() > W) W = (int)s.size();
     }
-    if (!width_override && lines.empty()) W = 80;
+    if (!width_override && u32lines.empty()) W = 80;
     if (width_override) W = *width_override;
 
     A.W = W;
     A.H = H;
     A.density.assign(H, std::vector<double>(W, 0.0));
     for (int i = 0; i < H; ++i) {
-        const std::string& row = (i < (int)lines.size() ? lines[i] : std::string());
+        const std::u32string& row = (i < (int)u32lines.size() ? u32lines[i] : std::u32string());
         for (int j = 0; j < W; ++j) {
-            unsigned char ch = (j < (int)row.size() ? (unsigned char)row[j] : (unsigned char)' ');
+            char32_t cp = (j < (int)row.size() ? row[j] : U' ');
             double d = 1.0;
-            if (static_cast<size_t>(ch) < local_map.v.size()) d = local_map.v[static_cast<size_t>(ch)];
-            else d = 1.0;
+            if (cp <= 127 && static_cast<size_t>(cp) < local_map.v.size()) d = local_map.v[static_cast<size_t>(cp)];
+            else d = 1.0; // non-ASCII treated as filled
             A.density[i][j] = d;
         }
     }
@@ -410,147 +454,325 @@ bool needs_separator(std::string_view a, std::string_view b) {
 }
 
 std::string convert_layout(const std::vector<Token>& tokens,
-                           int W,
-                           int H,
-                           const std::vector<std::vector<double>>& target_density,
-                           const AsciiDensity& density_map) {
-    // Basic, safe layout:
-    // - Preserve token order
-    // - Insert spaces when needs_separator() says so
-    // - Optionally add extra spaces to align with zero-density cells
-    // - Fill end-of-line remainder with at most one comment block to approximate 1-density targets
-    // Assumptions: no preprocessor directives/macros per user note.
+    int W,
+    int H,
+    const std::vector<std::vector<double>>& target_density,
+    const AsciiDensity& density_map) {
 
-    assert(W >= min_width);
+    const int shoot = 10;
+    const int MN_TOKENS = 4;
+    const int MX_COMMENT_LENGTH = 20;
+    const int W_BOUND = W + shoot;  //final width has to be strictly less than this
+    
+    int maxl = 0;
+    for(auto t : tokens)
+        maxl = std::max(maxl, int(t.size()));
+    assert(std::max(min_width, maxl) < W_BOUND);
 
-    auto is_one = [&](int r, int c) -> bool {
-        if (r < 0 || r >= H || c < 0 || c >= W) return false;
-        return target_density[r][c] > 0.5;
+    int n = tokens.size();
+
+    auto is_one = [&](double d) -> int
+    {
+        return d >= 0.5;
     };
 
-    auto pick_dense_char = [&]() -> char {
-        unsigned char cand = (unsigned char)'.';
-        if ((size_t)cand < density_map.v.size() && density_map.v[cand] > 0.5) return '.';
-        cand = (unsigned char)'*';
-        if ((size_t)cand < density_map.v.size() && density_map.v[cand] > 0.5) return '*';
-        cand = (unsigned char)'#';
-        if ((size_t)cand < density_map.v.size() && density_map.v[cand] > 0.5) return '#';
-        return 'X';
+    std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, 25);
+    auto rand_character = [&]() -> char 
+    {
+        return char('a' + dist(rng));
     };
-    const char dense_ch = pick_dense_char();
+    // Precompute char -> density(0/1) for ASCII range
+    std::array<unsigned char, 128> char01{};
+    for (int c = 0; c < 128; ++c) {
+        double d = (static_cast<size_t>(c) < density_map.v.size() ? density_map.v[static_cast<size_t>(c)] : 1.0);
+        char01[c] = static_cast<unsigned char>(is_one(d));
+    }
+    
+    std::string waifu = "";
+    int taken = 0, row = 0;
 
-    std::string out;
-    out.reserve(static_cast<size_t>(std::max(1, H)) * static_cast<size_t>(W + 1) + tokens.size() * 2);
-
-    std::string line;
-    line.reserve(static_cast<size_t>(W) + 64);
-    int row = 0;
-    int col = 0;
-    std::string prev;
-
-    auto fill_remainder = [&](int r, int c_start, std::string& dst) {
-        if (c_start >= W) return;
-        int width0 = W - c_start;
-        if (r < 0 || r >= H) {
-            dst.append(width0, ' ');
-            return;
+    // Precompute entire art density to 0/1 once
+    std::vector<std::vector<unsigned char>> dens01;
+    dens01.assign(H, std::vector<unsigned char>(W, 0));
+    for (int r = 0; r < H; ++r) {
+        for (int c = 0; c < W; ++c) {
+            dens01[r][c] = static_cast<unsigned char>(is_one(target_density[r][c]));
         }
-        int ones = 0;
-        for (int j = c_start; j < W; ++j) if (is_one(r, j)) ++ones;
-
-        // Heuristic: only use a comment if there are enough 1-cells to justify the overhead of /* */
-        const int overhead = 4; // '/*' + '*/'
-        const int threshold = 8; // keep comments sparse
-
-        if (width0 >= overhead + 1 && ones >= threshold) {
-            // Leading space for safety at boundary
-            dst.push_back(' ');
-            int rem = width0 - 1;
-            if (rem >= overhead) {
-                dst.append("/*");
-                rem -= 2;
-                int content_len = rem - 2; // reserve for closing */
-                for (int k = 0; k < content_len; ++k) {
-                    int j = c_start + 1 + 2 + k; // +1 leading space, +2 for /*
-                    char ch = (is_one(r, j) ? dense_ch : ' ');
-                    // Avoid placing '*' immediately before the closing '/' to not form '*/' prematurely.
-                    if (k == content_len - 1 && ch == '*') ch = (dense_ch == '*' ? '.' : dense_ch);
-                    dst.push_back(ch);
+    }
+    
+    while(taken < n or row < H)
+    {
+        // std::cerr << "row: " << row << std::endl;
+        // After finishing H rows (the art), compactly pack remaining tokens per line.
+        if (row >= H) {
+            // Overflow: pack greedily up to W + rand[0, shoot)
+            std::uniform_int_distribution<int> w_extra_dist(0, shoot - 1);
+            const int W_eff = W + w_extra_dist(rng);
+            std::string line;
+            int col = 0;
+            std::string_view prev;
+            while (taken < n) {
+                const std::string &tok = tokens[taken];
+                int sep = (!prev.empty() && needs_separator(prev, tok)) ? 1 : 0;
+                int L = sep + (int)tok.size();
+                if (col + L > W_eff) {
+                    // If nothing placed yet, place this token anyway to avoid empty lines
+                    if (col == 0) {
+                        if (sep) { line.push_back(' '); ++col; }
+                        line += tok; col += (int)tok.size();
+                        prev = tok; ++taken;
+                    }
+                    break; // flush line
                 }
-                dst.append("*/");
-                return;
+                if (sep) { line.push_back(' '); ++col; }
+                line += tok; col += (int)tok.size();
+                prev = tok; ++taken;
             }
-            // if not enough space after adding the leading space, fall through to spaces
-            // (rare due to the guard)
+            waifu += line + "\n";
+            ++row;
+            continue;
         }
+        /*
+            we have four types of blobs we can place:
+            1. spaces
+            2. comments
+            3. token that requires separation from the next
+            4. token that doesn't require separation from the next
 
-        // Fallback: spaces only
-        dst.append(width0, ' ');
-    };
+            define dp[position][number of tokens we used on this line][type of blob that ends at i] = maximum score we can get
 
-    for (size_t i = 0; i < tokens.size(); ) {
-        const std::string& tok = tokens[i];
-        int tlen = static_cast<int>(tok.size());
+            score = number of positions at which we match density
 
-        // Required minimal separator
-        int sep = (!prev.empty() && needs_separator(prev, tok)) ? 1 : 0;
+            as for the transitions:
+            - placing a space is trivial
+            - comments are multiline comments (/*) we can place spaces and characters in the contents of the comment (either place a space or a random character using rand_character)
+            - the one restriction for state transitions are that we cannot go directly from blob type 3 -> blob type 4 or blob type 3 -> blob type 3, we must place either a comment or a space after them
+            - this corresponds to replacing something like `int a` with either `int a` or `int<comment>a` (both of which are valid)
 
-        // Adaptive extra spaces to match zero-density cells before token
-        int extra = 0;
+            oh fuck i'll have to store back-pointers for reconstruction, fml
+
+            now letting this run as is would obviously just make it use comments everywhere
+            potential remedies:
+            1. track the number of comments used and limit them
+            2. track the length of the row covered by comments and limit it
+            3. require the usage of a minimum number of tokens on every line
+
+            lets just go with #3 for now, as it doesnt require the introduction of an extra state
+            this doesn't affect dp calculations, only the selection of the final optimal string
+        */
+        
+        //solve the dp
+        // Use heap-based buffers to avoid stack overflow for large W
+        const int STATES = W_BOUND * W_BOUND * 4;
+        auto IDX = [&](int i, int j, int k) -> int { return (i * W_BOUND + j) * 4 + k; };
+        std::vector<int> dp(STATES, 0);
+        std::vector<std::array<int,3>> back_point(STATES);
+
+        // state type mapping:
+        // 0 -> space
+        // 1 -> comment (/* ... */)
+        // 2 -> token (requires separation from the next token)
+        // 3 -> token (does not require separation from the next token)
+
+        const int NEG_INF = -1e9;
+
+        // Precompute desired density for this row (0/1), padded to W_BOUND with zeros
+        std::vector<unsigned char> want(W_BOUND, 0);
         if (row < H) {
-            const int cap = 6; // don't overdo spaces
-            while (col + sep + extra < W && extra < cap && !is_one(row, col + sep + extra)) {
-                ++extra;
+            for (int col = 0; col < std::min(W, W_BOUND); ++col) {
+                want[col] = dens01[row][col];
             }
         }
 
-        // Wrap if token doesn't fit
-        if (col + sep + extra + tlen > W) {
-            fill_remainder(row, col, line);
-            out.append(line);
-            out.push_back('\n');
-            line.clear();
-            col = 0;
-            ++row;
-            prev.clear();
-            continue; // reprocess current token on next line
+        // helpers
+        auto desired_at = [&](int col) -> int {
+            if (col >= 0 && col < W_BOUND) return (int)want[col];
+            return 0; // outside treated as 0-density target
+        };
+        auto density_of = [&](char ch) -> int {
+            unsigned char uch = static_cast<unsigned char>(ch);
+            return (uch < 128) ? (int)char01[uch] : 1;
+        };
+        auto score_char = [&](int col, char ch) -> int {
+            int want = desired_at(col);
+            int got = density_of(ch);
+            return (want == got) ? 1 : 0;
+        };
+        auto token_score = [&](int start_col, const std::string& tok) -> int {
+            int s = 0;
+            for (int t = 0; t < (int)tok.size(); ++t) s += score_char(start_col + t, tok[t]);
+            return s;
+        };
+        auto comment_score = [&](int start_col, int len) -> int {
+            // Layout: '/' '*' [content ...] '*' '/'
+            // Interiors always match by choice of space/non-space: contribute (len-4) if len>=4
+            int s = (len >= 4) ? (len - 4) : 0;
+            s += score_char(start_col + 0, '/');
+            s += score_char(start_col + 1, '*');
+            s += score_char(start_col + len - 2, '*');
+            s += score_char(start_col + len - 1, '/');
+            return s;
+        };
+
+        // init DP and back pointers
+        for (int i = 0; i < W_BOUND; ++i) {
+            for (int j = 0; j < W_BOUND; ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    dp[IDX(i,j,k)] = NEG_INF;
+                    back_point[IDX(i,j,k)] = {-1, -1, -1};
+                }
+            }
+        }
+        dp[IDX(0,0,0)] = 0; // start with an imaginary space state
+
+        int tokens_left_total = std::max(0, n - taken);
+        int maxJThisRow = std::min(W_BOUND - 1, tokens_left_total);
+        std::vector<unsigned char> need_sep(maxJThisRow + 1, 0);
+        for (int j = 0; j <= maxJThisRow; ++j) {
+            if (taken + j + 1 < n) need_sep[j] = (unsigned char)needs_separator(tokens[taken + j], tokens[taken + j + 1]);
         }
 
-        // Emit spaces and token
-        if (sep + extra > 0) { line.append(static_cast<size_t>(sep + extra), ' '); col += sep + extra; }
-        line.append(tok); col += tlen;
-        prev = tok;
+        // transitions
+        for (int i = 0; i < W_BOUND; ++i) {
+            for (int j = 0; j <= std::min(i, tokens_left_total); ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    int cur = dp[IDX(i,j,k)];
+                    if (cur == NEG_INF) continue;
 
-        // Auto-wrap if we hit end of line
-        if (col >= W) {
-            out.append(line);
-            out.push_back('\n');
-            line.clear();
-            col = 0;
-            ++row;
-            prev.clear();
+                    // type 1 transition: place a space (consumes 1 column)
+                    if (i + 1 < W_BOUND) {
+                        int add = score_char(i, ' ');
+                        int &ref = dp[IDX(i + 1, j, 0)];
+                        if (cur + add > ref) {
+                            ref = cur + add;
+                            back_point[IDX(i + 1, j, 0)] = {i, j, k};
+                        }
+                    }
+
+                    // type 2 transition: place a comment of length L in [4, MX_COMMENT_LENGTH]
+                    int Lmax = std::min(MX_COMMENT_LENGTH, W_BOUND - i - 1);
+                    for (int L = 4; L <= Lmax; ++L) {
+                        int add = comment_score(i, L);
+                        int &ref = dp[IDX(i + L, j, 1)];
+                        if (cur + add > ref) {
+                            ref = cur + add;
+                            back_point[IDX(i + L, j, 1)] = {i, j, k};
+                        }
+                    }
+
+                    // type 3/4 transitions: place a token (if allowed)
+                    if (j < tokens_left_total) {
+                        // Enforce restriction: cannot transition from type 2 (requires sep) directly to another token
+                        if (k != 2) {
+                            const std::string &tok = tokens[taken + j];
+                            int L = (int)tok.size();
+                            if (i + L < W_BOUND) {
+                                int add = token_score(i, tok);
+                                bool req_sep = (j <= maxJThisRow) ? (need_sep[j] != 0) : false;
+                                int nk = req_sep ? 2 : 3;
+                                int &ref = dp[IDX(i + L, j + 1, nk)];
+                                if (cur + add > ref) {
+                                    ref = cur + add;
+                                    back_point[IDX(i + L, j + 1, nk)] = {i, j, k};
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        ++i;
+
+
+        //choose the optimal string
+        std::array<int, 3> optimal_state = {0, 0, 0};
+
+        std::pair<int, std::array<int, 3>> opt = std::make_pair(NEG_INF, std::array<int, 3>{0, 0, 0});
+        int jLo = (tokens_left_total >= MN_TOKENS) ? MN_TOKENS : std::max(0, tokens_left_total);
+        int jHi = std::min(tokens_left_total, W_BOUND - 1);
+        for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
+            for (int j = jLo; j <= jHi; ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    int val = dp[IDX(i, j, k)];
+                    if (val > opt.first) opt = {val, {i, j, k}};
+                }
+            }
+        }
+        // Fallback: if still no valid, allow j==0 states (spaces/comments only)
+        if (opt.first == NEG_INF) {
+            for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
+                int j = 0;
+                for (int k = 0; k < 4; ++k) {
+                    int val = dp[IDX(i, j, k)];
+                    if (val > opt.first) opt = {val, {i, j, k}};
+                }
+            }
+        }
+        if (opt.first != NEG_INF) {
+            optimal_state = opt.second;
+        }
+
+        //reconstruct the optimal string using optimal_state and back_point
+        std::string this_row = "";
+        {
+            int ci = optimal_state[0];
+            int cj = optimal_state[1];
+            int ck = optimal_state[2];
+
+            // build segments backwards
+            std::string built;
+            while (ci > 0 || cj > 0) {
+                std::array<int, 3> prev = back_point[IDX(ci, cj, ck)];
+                if (prev[0] < 0) break; // no path
+                int pi = prev[0], pj = prev[1], pk = prev[2];
+                int len = ci - pi;
+
+                std::string seg;
+                if (ck == 0) {
+                    // space
+                    seg.push_back(' ');
+                } else if (ck == 1) {
+                    // comment
+                    // layout '/' '*' [content] '*' '/'
+                    if (len < 4) len = 4; // safety
+                    for (int t = 0; t < len; ++t) {
+                        int col = pi + t;
+                        if (t == 0) seg.push_back('/');
+                        else if (t == 1) seg.push_back('*');
+                        else if (t == len - 2) seg.push_back('*');
+                        else if (t == len - 1) seg.push_back('/');
+                        else {
+                            int wantbit = (row < H && col < W) ? dens01[row][col] : 0;
+                            if (wantbit == 0) seg.push_back(' ');
+                            else seg.push_back(rand_character());
+                        }
+                    }
+                } else {
+                    // token (ck == 2 or 3)
+                    if (pj >= 0 && pj < W_BOUND && (taken + pj) < n) {
+                        const std::string &tok = tokens[taken + pj];
+                        seg = tok;
+                    }
+                }
+
+                // prepend segment
+                this_row = seg + this_row;
+
+                ci = pi; cj = pj; ck = pk;
+            }
+        }
+
+        // advance global token counter by number of tokens used on this row
+        taken += optimal_state[1];
+
+        // std::cerr << "this_row: " << this_row << std::endl;
+        // std::cerr << this_row.length() << " " << W_BOUND << std::endl;
+
+        waifu += this_row + "\n";
+
+        ++ row;
     }
 
-    // Flush the last partially filled line
-    if (col > 0 || row < H) {
-        fill_remainder(row, col, line);
-        out.append(line);
-        out.push_back('\n');
-        line.clear();
-        ++row;
-    }
-
-    // Pad remaining rows up to H
-    while (row < H) {
-        fill_remainder(row, 0, line);
-        out.append(line);
-        out.push_back('\n');
-        line.clear();
-        ++row;
-    }
-
-    return out;
+    return waifu;
 }
 }

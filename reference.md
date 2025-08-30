@@ -55,11 +55,10 @@ cmake --build build -j
   --code input_code.cpp \
   --art input_art.txt \
   --out output_code.cpp \
-  --width 80 --height 40 \
   --dump-meta
 ```
 
-- **Width/height**: Default inferred from `input_art.txt` (rectangular assumption). Override with `--width`/`--height` if needed.
+- **Width/height**: Automatically inferred from `input_art.txt`. Override with `--width N`/`--height N` if needed.
 - **Debug info**: `--dump-meta` prints W, H, and token count to stderr.
 
 ## Semantics and compilation

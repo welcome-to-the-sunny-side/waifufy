@@ -24,11 +24,13 @@ cmake --build build -j
   --code input_code.cpp \
   --art input_art.txt \
   --out output_code.cpp \
-  --width 80 --height 40 \
   --dump-meta
 ```
 
-`--dump-meta` prints `W`, `H`, and token count to stderr.
+Optional parameters:
+- `--width N` / `--height N`: Override dimensions (default: inferred from art)
+- `--dump-meta`: Print width, height, and token count to stderr
+
 
 ## Implement your layout
 Edit `convert_layout()` in `src/waifufy_core.cpp`.
