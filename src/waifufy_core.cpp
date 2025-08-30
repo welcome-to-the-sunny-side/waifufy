@@ -701,6 +701,22 @@ std::string convert_layout(const std::vector<Token>& tokens,
         const int jHi = std::min(tokens_left_total, W_BOUND - 1);
         const int iStart = std::max(0, W - shoot);
 
+        // Scarcity-aware budgeting: compute token cap based on usage rate
+        int j_cap = jHi; // default: no additional cap
+        if (row > 0) { // only after first row
+            const int tokens_used_so_far = taken;
+            const int rows_processed_so_far = row;
+            const double avg_tokens_per_row = double(tokens_used_so_far) / double(rows_processed_so_far);
+            const int remaining_rows = H - row - 1;
+            const double projected_total_usage = tokens_used_so_far + avg_tokens_per_row * remaining_rows;
+            
+            if (projected_total_usage > n) { // scarcity detected
+                // Compute strict cap: distribute remaining tokens evenly
+                const int budget_per_remaining_row = std::max(0, (n - tokens_used_so_far) / std::max(1, remaining_rows + 1));
+                j_cap = std::min(jHi, budget_per_remaining_row);
+            }
+        }
+
         bool selected = false;
         for (int minTok = std::min(MN_TOKENS, tokens_left_total); minTok >= 0 && !selected; --minTok) {
             // 1) Check existence of any valid state with j >= minTok
@@ -726,11 +742,11 @@ std::string convert_layout(const std::vector<Token>& tokens,
             }
 
             // 3) Among states with j >= minTok and score >= bestVal - SCORE_RELAXATION,
-            //    choose the one with maximum j. If multiple, prefer higher score.
+            //    choose the one with maximum j <= j_cap. If multiple, prefer higher score.
             const int threshold = bestVal - SCORE_RELAXATION;
             std::array<int,3> chosen = bestState; // guaranteed to satisfy threshold
             bool found = false;
-            for (int j = jHi; j >= std::max(0, minTok) && !found; --j) {
+            for (int j = std::min(jHi, j_cap); j >= std::max(0, minTok) && !found; --j) {
                 int bestAtJ = NEG_INF; std::array<int,3> cand = {0,0,0};
                 for (int i = iStart; i < W_BOUND; ++i) {
                     for (int k = 0; k < 4; ++k) {
