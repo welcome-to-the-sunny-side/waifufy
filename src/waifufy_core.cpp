@@ -480,6 +480,7 @@ std::string convert_layout(const std::vector<Token>& tokens,
 
     std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<int> dist(0, 25);
+    std::uniform_int_distribution<int> coin(0, 1);
     auto rand_character = [&]() -> char 
     {
         return char('a' + dist(rng));
@@ -646,9 +647,12 @@ std::string convert_layout(const std::vector<Token>& tokens,
                     if (i + 1 < W_BOUND) {
                         int add = score_char(i, ' ');
                         int &ref = dp[IDX(i + 1, j, 0)];
-                        if (cur + add > ref) {
-                            ref = cur + add;
+                        int cand = cur + add;
+                        if (cand > ref) {
+                            ref = cand;
                             back_point[IDX(i + 1, j, 0)] = {i, j, k};
+                        } else if (cand == ref && ref != NEG_INF) {
+                            if (coin(rng)) back_point[IDX(i + 1, j, 0)] = {i, j, k};
                         }
                     }
 
@@ -657,9 +661,12 @@ std::string convert_layout(const std::vector<Token>& tokens,
                     for (int L = 4; L <= Lmax; ++L) {
                         int add = comment_score(i, L);
                         int &ref = dp[IDX(i + L, j, 1)];
-                        if (cur + add > ref) {
-                            ref = cur + add;
+                        int cand = cur + add;
+                        if (cand > ref) {
+                            ref = cand;
                             back_point[IDX(i + L, j, 1)] = {i, j, k};
+                        } else if (cand == ref && ref != NEG_INF) {
+                            if (coin(rng)) back_point[IDX(i + L, j, 1)] = {i, j, k};
                         }
                     }
 
@@ -674,9 +681,12 @@ std::string convert_layout(const std::vector<Token>& tokens,
                                 bool req_sep = (j <= maxJThisRow) ? (need_sep[j] != 0) : false;
                                 int nk = req_sep ? 2 : 3;
                                 int &ref = dp[IDX(i + L, j + 1, nk)];
-                                if (cur + add > ref) {
-                                    ref = cur + add;
+                                int cand = cur + add;
+                                if (cand > ref) {
+                                    ref = cand;
                                     back_point[IDX(i + L, j + 1, nk)] = {i, j, k};
+                                } else if (cand == ref && ref != NEG_INF) {
+                                    if (coin(rng)) back_point[IDX(i + L, j + 1, nk)] = {i, j, k};
                                 }
                             }
                         }
@@ -686,64 +696,62 @@ std::string convert_layout(const std::vector<Token>& tokens,
         }
 
 
-        //choose the optimal string
+        // choose the optimal string with relaxed selection by token count
         std::array<int, 3> optimal_state = {0, 0, 0};
+        const int jHi = std::min(tokens_left_total, W_BOUND - 1);
+        const int iStart = std::max(0, W - shoot);
 
-        int jHi = std::min(tokens_left_total, W_BOUND - 1);
         bool selected = false;
-        for (int minTok = std::min(MN_TOKENS, tokens_left_total); minTok >= 0; --minTok) {
+        for (int minTok = std::min(MN_TOKENS, tokens_left_total); minTok >= 0 && !selected; --minTok) {
             // 1) Check existence of any valid state with j >= minTok
-            bool has_any = false;
-            for (int i = std::max(0, W - shoot); i < W_BOUND && !has_any; ++i) {
-                for (int j = std::max(minTok, 0); j <= jHi && !has_any; ++j) {
+            bool any = false;
+            for (int i = iStart; i < W_BOUND && !any; ++i) {
+                for (int j = std::max(0, minTok); j <= jHi && !any; ++j) {
                     for (int k = 0; k < 4; ++k) {
-                        if (dp[IDX(i, j, k)] != NEG_INF) { has_any = true; break; }
+                        if (dp[IDX(i, j, k)] != NEG_INF) { any = true; break; }
                     }
                 }
             }
-            if (!has_any) continue; // try lower minTok
+            if (!any) continue; // try smaller minimum tokens
 
-            // 2) Find the optimal answer (best score) among states with j >= minTok
-            int bestScore = NEG_INF;
-            std::array<int,3> bestState = {0,0,0};
-            for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
-                for (int j = std::max(minTok, 0); j <= jHi; ++j) {
-                    for (int k = 0; k < 4; ++k) {
-                        int val = dp[IDX(i, j, k)];
-                        if (val > bestScore) { bestScore = val; bestState = {i, j, k}; }
-                    }
-                }
-            }
-
-            // 3) Within score <= best + SCORE_RELAXATION, choose the state with maximum tokens
-            int threshold = bestScore + SCORE_RELAXATION;
-            int bestJ = -1;
-            std::array<int,3> bestJState = bestState; // default
-            for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
-                for (int j = std::max(minTok, 0); j <= jHi; ++j) {
+            // 2) Find optimal value among states with j >= minTok
+            int bestVal = NEG_INF; std::array<int,3> bestState = {0,0,0};
+            for (int i = iStart; i < W_BOUND; ++i) {
+                for (int j = std::max(0, minTok); j <= jHi; ++j) {
                     for (int k = 0; k < 4; ++k) {
                         int val = dp[IDX(i, j, k)];
-                        if (val != NEG_INF && val <= threshold) {
-                            if (j > bestJ) { bestJ = j; bestJState = {i, j, k}; }
-                        }
+                        if (val > bestVal) { bestVal = val; bestState = {i, j, k}; }
                     }
                 }
             }
 
-            optimal_state = bestJState;
+            // 3) Among states with j >= minTok and score >= bestVal - SCORE_RELAXATION,
+            //    choose the one with maximum j. If multiple, prefer higher score.
+            const int threshold = bestVal - SCORE_RELAXATION;
+            std::array<int,3> chosen = bestState; // guaranteed to satisfy threshold
+            bool found = false;
+            for (int j = jHi; j >= std::max(0, minTok) && !found; --j) {
+                int bestAtJ = NEG_INF; std::array<int,3> cand = {0,0,0};
+                for (int i = iStart; i < W_BOUND; ++i) {
+                    for (int k = 0; k < 4; ++k) {
+                        int val = dp[IDX(i, j, k)];
+                        if (val >= threshold && val > bestAtJ) { bestAtJ = val; cand = {i, j, k}; }
+                    }
+                }
+                if (bestAtJ != NEG_INF) { chosen = cand; found = true; }
+            }
+            optimal_state = chosen;
             selected = true;
-            break;
         }
-
-        // Fallback: as a last resort, allow j==0 states (spaces/comments only)
+        // Safety fallback (should not trigger because minTok=0 always has a state)
         if (!selected) {
-            int bestScore = NEG_INF;
-            std::array<int,3> bestState = {0,0,0};
-            for (int i = std::max(0, W - shoot); i < W_BOUND; ++i) {
-                int j = 0;
-                for (int k = 0; k < 4; ++k) {
-                    int val = dp[IDX(i, j, k)];
-                    if (val > bestScore) { bestScore = val; bestState = {i, j, k}; }
+            int bestVal = NEG_INF; std::array<int,3> bestState = {0,0,0};
+            for (int i = iStart; i < W_BOUND; ++i) {
+                for (int j = 0; j <= jHi; ++j) {
+                    for (int k = 0; k < 4; ++k) {
+                        int val = dp[IDX(i, j, k)];
+                        if (val > bestVal) { bestVal = val; bestState = {i, j, k}; }
+                    }
                 }
             }
             optimal_state = bestState;
