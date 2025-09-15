@@ -1,3 +1,5 @@
+bitset waifu!!!
+
 ![Waifufy](assets/bitset_waifu.png)
 
 (AI-Generated readme below)
