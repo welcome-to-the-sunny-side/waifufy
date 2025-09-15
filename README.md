@@ -1,3 +1,7 @@
+![Waifufy](assets/bitset_waifu.png)
+
+(AI-Generated readme below)
+
 # Waifufy: C++ → ASCII Art
 
 A C++ tool that formats C++ programs to visually approximate ASCII art while preserving program semantics.
